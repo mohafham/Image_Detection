@@ -1,9 +1,36 @@
-from google import genai
 import os
 
-# Configure Gemini API
+try:
+    from google import genai as google_genai
+except Exception:
+    google_genai = None
+
+try:
+    import google.generativeai as google_generativeai
+except Exception:
+    google_generativeai = None
+
+# Configure Gemini API with SDK compatibility fallback
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-client = genai.Client(api_key=GOOGLE_API_KEY) if GOOGLE_API_KEY else None
+client = None
+client_mode = None
+
+if GOOGLE_API_KEY:
+    if google_genai is not None:
+        try:
+            client = google_genai.Client(api_key=GOOGLE_API_KEY)
+            client_mode = "google_genai"
+        except Exception:
+            client = None
+            client_mode = None
+    elif google_generativeai is not None:
+        try:
+            google_generativeai.configure(api_key=GOOGLE_API_KEY)
+            client = google_generativeai.GenerativeModel("gemini-1.5-flash")
+            client_mode = "google_generativeai"
+        except Exception:
+            client = None
+            client_mode = None
 
 SYSTEM_PROMPT = """
 You are an expert in digital forensics and AI-generated image detection.
@@ -43,10 +70,15 @@ def generate_explanation(label: str, confidence: float, top_regions: str) -> str
             return generate_fallback_explanation(label, confidence)
         
         # Generate content using new google.genai API
-        response = client.models.generate_content(
-            model='gemini-2.0-flash-exp',
-            contents=prompt
-        )
+        if client_mode == "google_genai":
+            response = client.models.generate_content(
+                model='gemini-2.0-flash-exp',
+                contents=prompt
+            )
+        elif client_mode == "google_generativeai":
+            response = client.generate_content(prompt)
+        else:
+            return generate_fallback_explanation(label, confidence)
         
         return response.text
     except Exception as e:
