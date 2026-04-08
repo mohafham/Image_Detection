@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const BACKEND_URL = 'http://localhost:8001';
+const RAW_BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8001';
+const BACKEND_URL = RAW_BACKEND_URL.replace(/\/+$/, '');
 
 function App() {
   const [backendStatus, setBackendStatus] = useState('checking');
