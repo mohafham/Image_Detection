@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import torch, timm, io, base64
@@ -8,6 +8,7 @@ from torchvision import transforms
 from gradcam import generate_gradcam
 from explain import generate_explanation
 import cv2
+import threading
 import os
 from dotenv import load_dotenv
 
@@ -37,17 +38,37 @@ LABELS = ["AI-GENERATED", "REAL"]
 import os
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "best_model.pth")
 
-# Check if model exists
-if not os.path.exists(MODEL_PATH):
-    print(f"WARNING: Model file not found at {MODEL_PATH}")
-    print("Please train the model first or place best_model.pth in the models/ directory")
-    model = timm.create_model("efficientnet_b3", pretrained=False, num_classes=2)
-    model.eval().to(DEVICE)
-else:
-    model = timm.create_model("efficientnet_b3", pretrained=False, num_classes=2)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-    model.eval().to(DEVICE)
-    print(f"Model loaded successfully from {MODEL_PATH}")
+model = None
+model_load_error = None
+model_lock = threading.Lock()
+
+
+def ensure_model_loaded():
+    global model, model_load_error
+    if model is not None:
+        return model
+
+    with model_lock:
+        if model is not None:
+            return model
+
+        try:
+            loaded_model = timm.create_model("efficientnet_b3", pretrained=False, num_classes=2)
+            if os.path.exists(MODEL_PATH):
+                loaded_model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+                print(f"Model loaded successfully from {MODEL_PATH}")
+            else:
+                print(f"WARNING: Model file not found at {MODEL_PATH}")
+                print("Using untrained model weights; predictions will be unreliable.")
+
+            loaded_model.eval().to(DEVICE)
+            model = loaded_model
+            model_load_error = None
+        except Exception as exc:
+            model_load_error = str(exc)
+            raise
+
+    return model
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -71,6 +92,11 @@ def root():
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    try:
+        active_model = ensure_model_loaded()
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Model initialization failed: {model_load_error}")
+
     # Load image
     img_bytes = await file.read()
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -80,7 +106,7 @@ async def predict(file: UploadFile = File(...)):
     # Inference
     tensor = transform(img_resized).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
-        logits = model(tensor)
+        logits = active_model(tensor)
         probs = torch.softmax(logits, dim=1)[0]
         pred = probs.argmax().item()
         confidence = probs[pred].item()
@@ -88,7 +114,7 @@ async def predict(file: UploadFile = File(...)):
     label = LABELS[pred]
 
     # Grad-CAM
-    heatmap = generate_gradcam(model, tensor, img_np, pred)
+    heatmap = generate_gradcam(active_model, tensor, img_np, pred)
     _, buffer = cv2.imencode(".png", cv2.cvtColor(heatmap, cv2.COLOR_RGB2BGR))
     heatmap_b64 = base64.b64encode(buffer).decode("utf-8")
 
@@ -104,4 +130,8 @@ async def predict(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model_loaded": model is not None,
+        "model_path_exists": os.path.exists(MODEL_PATH)
+    }
